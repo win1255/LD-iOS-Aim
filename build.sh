@@ -12,7 +12,7 @@ clang -target arm64-apple-ios12.0 \
   -dynamiclib \
   -o LD_iOS_Aim.dylib \
   entry.mm \
-  -framework UIKit -framework Foundation -framework CoreGraphics -lc++
+  -framework UIKit -framework Foundation -lc++
 
 codesign -s - --force LD_iOS_Aim.dylib
 echo "BUILD OK:"

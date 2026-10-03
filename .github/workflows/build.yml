@@ -1,0 +1,21 @@
+name: Build LD-iOS dylib
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build dylib
+        run: bash build.sh
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LD_iOS_Aim_dylib
+          path: LD_iOS_Aim.dylib
+          if-no-files-found: error

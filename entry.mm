@@ -4,7 +4,12 @@
 #import <string.h>
 
 // ============================================================
-// LD-iOS 插件 v0.2 —— A镜（恐龙属性面板）v1
+// LD-iOS 插件 v0.3 —— A镜（恐龙属性面板）
+// 相对 v0.2 的修复：
+//   1) 去掉 CoreGraphics 外部依赖（CGPointZero/CGRectInset 改为内联等价，
+//      编译依赖与 v0.1 完全一致：UIKit+Foundation+libc++，排除重签/dyld 加载差异）
+//   2) 弹窗先行：constructor 只做 v0.1 同款弹窗（实测成功过），A镜面板延迟 2 秒再启动
+//   3) 全程 @try 保护：任何一步异常都不影响弹窗出现
 // 数据来源：直接内存读取（IDA 9.4 分析 ShooterGame 1.10192 iOS arm64）
 // 引擎锚点：
 //   GEngine = *(uintptr_t*)0x105D80720（GetGameWorld 实现直读，已确认）
@@ -12,7 +17,6 @@
 //   ULevel  = *(ULevel**)(World + 0x1d0)（PersistentLevel，FProperty 反解）
 //   Actors  = ULevel 内 TArray<AActor*>（运行时启发式定位）
 // 恐龙字段：APrimalDinoCharacter（iOS 64 位偏移，ios_analysis5.txt）
-// 属性组件：APrimalCharacterStatusComponent（ios_analysis4.txt）
 // ============================================================
 
 #define GENGINE_ADDR     0x105D80720ULL
@@ -149,7 +153,7 @@ static LDPanelHelper *g_helper = nil;
     if (!v) return;
     CGPoint t = [gr translationInView:v.superview];
     v.center = CGPointMake(v.center.x + t.x, v.center.y + t.y);
-    [gr setTranslation:CGPointZero inView:v.superview];
+    [gr setTranslation:CGPointMake(0, 0) inView:v.superview];
 }
 @end
 
@@ -158,89 +162,50 @@ static UILabel   *g_label = nil;
 static dispatch_source_t g_timer = nil;
 
 static void updatePanel(void) {
-    if (!g_label) return;
-    uintptr_t world = getWorld();
-    uintptr_t level = getLevel(world);
-    uintptr_t actors[1024];
-    int n = getActors(level, actors, 1024);
-    uintptr_t dino = 0;
-    for (int i = 0; i < n; i++) {
-        if (isDino(actors[i])) { dino = actors[i]; break; }
+    @try {
+        if (!g_label) return;
+        uintptr_t world = getWorld();
+        uintptr_t level = getLevel(world);
+        uintptr_t actors[1024];
+        int n = getActors(level, actors, 1024);
+        uintptr_t dino = 0;
+        for (int i = 0; i < n; i++) {
+            if (isDino(actors[i])) { dino = actors[i]; break; }
+        }
+        if (!dino) {
+            g_label.text = @"A镜：未找到恐龙（进游戏后自动检测）";
+            return;
+        }
+        float hp  = rdF(dino + DINO_HEALTH);
+        float mhp = rdF(dino + DINO_MAXHEALTH);
+        float tp  = rdF(dino + DINO_TORPOR);
+        float mtp = rdF(dino + DINO_MAXTORPOR);
+        uintptr_t st = rd64(dino + DINO_STATUS);
+        int blv = rdI(st + ST_BASELEVEL);
+        int elv = rdI(st + ST_EXTRALEVEL);
+        float *cur = (float *)rd64(st + ST_CUR);
+        int ncur = rdI(st + ST_CUR + 8);
+        float stamina = ncur > 1 ? cur[1] : 0;
+        float oxygen  = ncur > 3 ? cur[3] : 0;
+        float food    = ncur > 4 ? cur[4] : 0;
+        float weight  = ncur > 7 ? cur[7] : 0;
+        float melee   = ncur > 8 ? cur[8] : 0;
+        float speed   = ncur > 9 ? cur[9] : 0;
+        NSString *name = readName(dino);
+        NSString *txt = [NSString stringWithFormat:
+            @"A镜 | %@\n等级 Lv.%d\n\n生命 %d / %d\n眩晕 %d / %d\n耐力 %.1f\n氧气 %.1f\n食物 %.1f\n负重 %.1f\n近战 %.0f%%\n速度 %.0f%%",
+            name, blv + elv,
+            (int)hp, (int)mhp, (int)tp, (int)mtp,
+            stamina, oxygen, food, weight, melee * 100.0f, speed * 100.0f];
+        g_label.text = txt;
+    } @catch (NSException *e) {
+        NSLog(@"[LD] updatePanel exception: %@", e);
     }
-    if (!dino) {
-        g_label.text = @"A镜：未找到恐龙（进游戏后自动检测）";
-        return;
-    }
-    float hp  = rdF(dino + DINO_HEALTH);
-    float mhp = rdF(dino + DINO_MAXHEALTH);
-    float tp  = rdF(dino + DINO_TORPOR);
-    float mtp = rdF(dino + DINO_MAXTORPOR);
-    uintptr_t st = rd64(dino + DINO_STATUS);
-    int blv = rdI(st + ST_BASELEVEL);
-    int elv = rdI(st + ST_EXTRALEVEL);
-    float *cur = (float *)rd64(st + ST_CUR);
-    int ncur = rdI(st + ST_CUR + 8);
-    float stamina = ncur > 1 ? cur[1] : 0;
-    float oxygen  = ncur > 3 ? cur[3] : 0;
-    float food    = ncur > 4 ? cur[4] : 0;
-    float weight  = ncur > 7 ? cur[7] : 0;
-    float melee   = ncur > 8 ? cur[8] : 0;
-    float speed   = ncur > 9 ? cur[9] : 0;
-    NSString *name = readName(dino);
-    NSString *txt = [NSString stringWithFormat:
-        @"A镜 | %@\n等级 Lv.%d\n\n生命 %d / %d\n眩晕 %d / %d\n耐力 %.1f\n氧气 %.1f\n食物 %.1f\n负重 %.1f\n近战 %.0f%%\n速度 %.0f%%",
-        name, blv + elv,
-        (int)hp, (int)mhp, (int)tp, (int)mtp,
-        stamina, oxygen, food, weight, melee * 100.0f, speed * 100.0f];
-    g_label.text = txt;
 }
 
 static void startAim(void) {
-    if (g_panel) return;
-    UIWindow *win = nil;
-    if (@available(iOS 13.0, *)) {
-        NSArray *scenes = [UIApplication sharedApplication].connectedScenes.allObjects;
-        if (scenes.count) {
-            UIWindowScene *ws = scenes.firstObject;
-            for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { win = w; break; } }
-            if (!win && ws.windows.count) win = ws.windows.firstObject;
-        }
-    }
-    if (!win) win = [[UIApplication sharedApplication] keyWindow];
-    if (!win) return;
-
-    CGFloat W = win.bounds.size.width;
-    g_panel = [[UIView alloc] initWithFrame:CGRectMake(W - 255, 90, 245, 300)];
-    g_panel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.72];
-    g_panel.layer.cornerRadius = 12;
-    g_panel.layer.borderWidth = 1;
-    g_panel.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.35].CGColor;
-    g_panel.userInteractionEnabled = YES;
-
-    g_label = [[UILabel alloc] initWithFrame:CGRectInset(g_panel.bounds, 10, 10)];
-    g_label.numberOfLines = 0;
-    g_label.font = [UIFont systemFontOfSize:13];
-    g_label.textColor = [UIColor whiteColor];
-    g_label.text = @"A镜：未找到恐龙（进游戏后自动检测）";
-    [g_panel addSubview:g_label];
-
-    // 可拖动
-    UIPanGestureRecognizer *drag = [[UIPanGestureRecognizer alloc] initWithTarget:[LDPanelHelper shared] action:@selector(pan:)];
-    [g_panel addGestureRecognizer:drag];
-
-    [win addSubview:g_panel];
-    [win bringSubviewToFront:g_panel];
-
-    g_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(g_timer, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), 0.5 * NSEC_PER_SEC, 0.05 * NSEC_PER_SEC);
-    dispatch_source_set_event_handler(g_timer, ^{ updatePanel(); });
-    dispatch_resume(g_timer);
-}
-
-__attribute__((constructor))
-static void ld_init() {
-    NSLog(@"[LD-iOS] 注入成功 v0.2 A镜版");
-    dispatch_async(dispatch_get_main_queue(), ^{
+    @try {
+        if (g_panel) return;
         UIWindow *win = nil;
         if (@available(iOS 13.0, *)) {
             NSArray *scenes = [UIApplication sharedApplication].connectedScenes.allObjects;
@@ -251,14 +216,77 @@ static void ld_init() {
             }
         }
         if (!win) win = [[UIApplication sharedApplication] keyWindow];
-        if (!win) return;
-        UIViewController *vc = win.rootViewController;
-        if (!vc) return;
-        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"LD-iOS A镜"
-                                                                   message:@"A镜已启动（右上角面板，可拖动）"
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [vc presentViewController:a animated:YES completion:nil];
-        startAim();
+        if (!win) { NSLog(@"[LD] startAim: no window"); return; }
+
+        CGFloat W = win.bounds.size.width;
+        g_panel = [[UIView alloc] initWithFrame:CGRectMake(W - 255, 90, 245, 300)];
+        g_panel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.72];
+        g_panel.layer.cornerRadius = 12;
+        g_panel.layer.borderWidth = 1;
+        g_panel.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.35].CGColor;
+        g_panel.userInteractionEnabled = YES;
+
+        CGRect lf = CGRectMake(10, 10, g_panel.bounds.size.width - 20, g_panel.bounds.size.height - 20);
+        g_label = [[UILabel alloc] initWithFrame:lf];
+        g_label.numberOfLines = 0;
+        g_label.font = [UIFont systemFontOfSize:13];
+        g_label.textColor = [UIColor whiteColor];
+        g_label.text = @"A镜：未找到恐龙（进游戏后自动检测）";
+        [g_panel addSubview:g_label];
+
+        // 可拖动
+        UIPanGestureRecognizer *drag = [[UIPanGestureRecognizer alloc] initWithTarget:[LDPanelHelper shared] action:@selector(pan:)];
+        [g_panel addGestureRecognizer:drag];
+
+        [win addSubview:g_panel];
+        [win bringSubviewToFront:g_panel];
+
+        g_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        dispatch_source_set_timer(g_timer, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC), 0.5 * NSEC_PER_SEC, 0.05 * NSEC_PER_SEC);
+        dispatch_source_set_event_handler(g_timer, ^{ updatePanel(); });
+        dispatch_resume(g_timer);
+        NSLog(@"[LD] A镜 panel started");
+    } @catch (NSException *e) {
+        NSLog(@"[LD] startAim exception: %@", e);
+    }
+}
+
+__attribute__((constructor))
+static void ld_init() {
+    NSLog(@"[LD-iOS] 注入成功 v0.3 A镜版");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            // 弹窗先行（v0.1 同款窗口获取逻辑，实测成功）
+            UIWindow *win = nil;
+            if (@available(iOS 13.0, *)) {
+                NSArray *scenes = [UIApplication sharedApplication].connectedScenes.allObjects;
+                if (scenes.count) {
+                    id ws = scenes.firstObject;
+                    if ([ws isKindOfClass:[UIWindowScene class]]) {
+                        UIWindowScene *s = (UIWindowScene *)ws;
+                        win = s.keyWindow;
+                        if (!win && s.windows.count) win = s.windows.firstObject;
+                    }
+                }
+            }
+            if (!win) win = [[UIApplication sharedApplication] keyWindow];
+            if (!win) { NSLog(@"[LD] ld_init: no window, bail"); return; }
+            UIViewController *vc = win.rootViewController;
+            if (!vc) { NSLog(@"[LD] ld_init: no rootVC, bail"); return; }
+
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"LD-iOS A镜 v0.3"
+                                                                       message:@"注入成功（A镜面板 2 秒后启动）"
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [vc presentViewController:a animated:YES completion:nil];
+            NSLog(@"[LD] alert shown, scheduling A镜 in 2s");
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                startAim();
+                NSLog(@"[LD] startAim returned");
+            });
+        } @catch (NSException *e) {
+            NSLog(@"[LD] ld_init exception: %@", e);
+        }
     });
 }

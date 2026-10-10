@@ -1,0 +1,8 @@
+task:
+  name: build-ios-dylib
+  macos_instance:
+    image: ghcr.io/cirruslabs/macos-ventura-xcode:14.2
+  compile_script:
+    - SDK=$(xcrun --sdk iphoneos --show-sdk-path) && clang -target arm64-apple-ios12.0 -dynamiclib -fobjc-arc entry.mm -framework UIKit -framework Foundation -framework CommonCrypto -lc++ -isysroot "$SDK" -o LD_iOS_Aim.dylib && codesign -s - --force LD_iOS_Aim.dylib
+  artifacts:
+    - LD_iOS_Aim.dylib
